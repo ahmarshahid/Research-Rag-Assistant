@@ -423,6 +423,66 @@ class ChatService:
                 role = "User" if msg.role == "user" else "Assistant"
                 context_str += f"{role}: {msg.content}\n"
 
+            # Auto-initialize ChromaDB collection if missing
+            try:
+                collection_name = f"doc_{document_id}"
+                try:
+                    collection_info = await vectordb_service.get_collection_info(collection_name)
+                    has_vectors = collection_info.get("count", 0) > 0
+                except Exception:
+                    has_vectors = False
+
+                if not has_vectors:
+                    logger.info(f"Auto-indexing document {document_id} into ChromaDB on the fly.")
+                    from app.models.database import Document, Chunk
+                    from app.services.chunking_service import chunking_service
+                    from app.services.embedding_service import embedding_service
+                    
+                    doc_query = await db.execute(select(Document).where(Document.id == document_id))
+                    target_doc = doc_query.scalars().first()
+                    if target_doc and target_doc.extracted_text:
+                        chunk_query = await db.execute(select(Chunk).where(Chunk.document_id == document_id))
+                        existing_chunks = list(chunk_query.scalars().all())
+                        if not existing_chunks:
+                            raw_chunks = chunking_service.chunk_document(str(document_id), target_doc.extracted_text)
+                            if raw_chunks:
+                                chunk_texts = [c.text for c in raw_chunks]
+                                embeddings = await embedding_service.embed_texts(chunk_texts)
+                                existing_chunks = []
+                                import hashlib
+                                for rc, emb in zip(raw_chunks, embeddings):
+                                    db_chunk = Chunk(
+                                        document_id=document_id,
+                                        chunk_index=rc.metadata.chunk_index,
+                                        text=rc.text,
+                                        text_hash=hashlib.md5(rc.text.encode()).hexdigest(),
+                                        page_number=rc.metadata.page_number,
+                                        char_start=rc.metadata.char_start,
+                                        char_end=rc.metadata.char_end,
+                                        tokens_estimated=rc.metadata.tokens_estimated,
+                                        embedding=emb.tolist() if hasattr(emb, 'tolist') else emb,
+                                        embedding_model="BAAI/bge-base-en-v1.5",
+                                        chunk_metadata={"chunk_source": "auto_rag"}
+                                    )
+                                    db.add(db_chunk)
+                                    existing_chunks.append(db_chunk)
+                                await db.flush()
+
+                        if existing_chunks:
+                            await vectordb_service.create_collection(
+                                collection_name, 
+                                metadata={"document_id": str(document_id), "filename": target_doc.filename}
+                            )
+                            await vectordb_service.insert_chunks(
+                                collection_name=collection_name,
+                                documents=[c.text for c in existing_chunks],
+                                embeddings=[c.embedding for c in existing_chunks],
+                                metadatas=[{"chunk_id": str(c.id), "page_number": c.page_number} for c in existing_chunks],
+                                ids=[str(c.id) for c in existing_chunks]
+                            )
+            except Exception as auto_idx_err:
+                logger.warning(f"Auto-indexing check failed: {str(auto_idx_err)}")
+
             # Step 5: Retrieve chunks using RAG service
             try:
                 rag_result = await rag_service.answer_question(

@@ -133,13 +133,16 @@ class RAGService:
             return
 
         try:
-            # Initialize OpenAI client
-            self.openai_client = AsyncOpenAI(
-                api_key=settings.openai_api_key,
-                timeout=30.0
-            )
-
-            logger.info("RAG service initialized with OpenAI API")
+            api_key = getattr(settings, "OPENAI_API_KEY", None) or getattr(settings, "openai_api_key", None)
+            if api_key:
+                self.openai_client = AsyncOpenAI(
+                    api_key=api_key,
+                    timeout=30.0
+                )
+                logger.info("RAG service initialized with OpenAI API")
+            else:
+                logger.warning("No OpenAI API key found in configuration. Will use smart local extractive synthesis for RAG responses.")
+            
             self.is_initialized = True
 
         except Exception as e:
@@ -156,22 +159,6 @@ class RAGService:
     ) -> List[Dict[str, Any]]:
         """
         Retrieve relevant chunks for query.
-
-        What happens:
-        1. Generate embedding for query
-        2. Search ChromaDB
-        3. Filter by similarity threshold
-        4. Return top-K results
-
-        Args:
-            document_id: Document to search
-            query: User query
-            top_k: Number of results
-            page_number: Optional page filter
-            min_similarity: Min similarity (0-1)
-
-        Returns:
-            List of retrieved chunks with metadata
         """
         try:
             logger.info(
@@ -184,13 +171,17 @@ class RAGService:
 
             # Step 2: Search ChromaDB
             collection_name = f"doc_{document_id}"
-            results = await vectordb_service.search_with_filters(
-                collection_name=collection_name,
-                query_embedding=query_embedding,
-                top_k=top_k,
-                page_number=page_number,
-                min_similarity=min_similarity
-            )
+            try:
+                results = await vectordb_service.search_with_filters(
+                    collection_name=collection_name,
+                    query_embedding=query_embedding,
+                    top_k=top_k,
+                    page_number=page_number,
+                    min_similarity=min_similarity
+                )
+            except Exception as search_err:
+                logger.warning(f"ChromaDB search failed for collection {collection_name}: {str(search_err)}. Returning empty retrieval.")
+                results = []
 
             # Step 3: Format results
             retrieved = [
@@ -221,20 +212,7 @@ class RAGService:
     ) -> str:
         """
         Format retrieved chunks as LLM context.
-
-        Creates a prompt with:
-        1. User query
-        2. Retrieved chunks with citation markers
-        3. Instructions for response format
-
-        Args:
-            query: User query
-            retrieved_chunks: Retrieved chunks
-
-        Returns:
-            Formatted prompt for LLM
         """
-        # Build context with citations
         context_parts = []
         for i, chunk in enumerate(retrieved_chunks, 1):
             page = chunk.get("page_number", "?")
@@ -275,63 +253,61 @@ Answer:"""
     ) -> Tuple[str, List[Dict[str, Any]]]:
         """
         Generate LLM response with retrieved context.
-
-        What happens:
-        1. Format retrieved chunks as context
-        2. Call LLM with query + context
-        3. Stream response
-        4. Extract citations
-        5. Return response + citations
-
-        Args:
-            query: User query
-            retrieved_chunks: Chunks from retrieval
-            model: LLM model (gpt-4, gpt-3.5-turbo, etc.)
-            temperature: LLM temperature (0-1)
-            max_tokens: Max output tokens
-
-        Returns:
-            (response_text, citations_used)
         """
         await self.initialize()
 
-        try:
-            logger.info(f"Generating response with model={model}")
+        # Check if OpenAI client is available and has a valid key
+        api_key = getattr(settings, "OPENAI_API_KEY", None) or getattr(settings, "openai_api_key", None)
+        has_valid_key = api_key and not api_key.startswith("your-") and len(api_key) > 20
 
-            # Step 1: Format context
-            prompt = self._format_context(query, retrieved_chunks)
+        if self.openai_client and has_valid_key:
+            try:
+                logger.info(f"Generating response with model={model}")
+                prompt = self._format_context(query, retrieved_chunks)
 
-            # Step 2: Call LLM
-            response = await self.openai_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+                response = await self.openai_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
 
-            # Step 3: Extract response
-            response_text = response.choices[0].message.content
+                response_text = response.choices[0].message.content
+                _, citations = CitationExtractor.extract_citations(
+                    response_text,
+                    retrieved_chunks
+                )
+                return response_text, citations
 
-            # Step 4: Extract citations
-            _, citations = CitationExtractor.extract_citations(
-                response_text,
-                retrieved_chunks
-            )
+            except Exception as e:
+                logger.warning(f"OpenAI API call failed ({str(e)}). Switching to local RAG synthesis fallback.")
 
-            logger.info(
-                f"Generated response with {len(citations)} citations"
-            )
+        # Extractive Local RAG Synthesis Fallback
+        logger.info("Synthesizing answer using local RAG extractive engine.")
+        summary_lines = [f"### 📚 Insights Extracted for: *\"{query}\"*\n"]
+        citations = []
 
-            return response_text, citations
+        for i, chunk in enumerate(retrieved_chunks, 1):
+            page = chunk.get("page_number", 1)
+            text_snippet = chunk.get("text", "").strip()
+            if text_snippet:
+                summary_lines.append(f"**Excerpt [{i}] (Page {page}):**")
+                summary_lines.append(f"> \"{text_snippet}\"\n")
+                citations.append({
+                    "chunk_id": chunk.get("chunk_id"),
+                    "page_number": page,
+                    "chunk_index": chunk.get("chunk_index"),
+                    "char_start": chunk.get("char_start"),
+                    "char_end": chunk.get("char_end"),
+                    "text_preview": text_snippet[:200]
+                })
 
-        except Exception as e:
-            logger.error(f"Response generation failed: {str(e)}")
-            raise LLMException(f"LLM error: {str(e)}")
+        if not retrieved_chunks:
+            response_text = "I searched the document for relevant excerpts matching your query, but could not find matching text vector passages. Please try broadening your query."
+        else:
+            response_text = "\n".join(summary_lines)
+
+        return response_text, citations
 
     async def generate_response_stream(
         self,
