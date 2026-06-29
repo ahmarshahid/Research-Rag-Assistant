@@ -12,7 +12,7 @@ import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZIPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 
@@ -22,6 +22,7 @@ from app.utils.errors import ApplicationException
 from app.models.schemas import ErrorResponse, HealthCheckResponse
 from app.dependencies import init_db, AsyncSessionLocal
 from app.cache.redis_client import redis_client
+from sqlalchemy import text
 import logging
 
 logger = logging.getLogger(__name__)
@@ -65,13 +66,13 @@ async def lifespan(app: FastAPI):
 
         # Test database connection
         async with AsyncSessionLocal() as db:
-            await db.execute("SELECT 1")
+            await db.execute(text("SELECT 1"))
         logger.info("Database connection verified")
 
         logger.info(f"{settings.APP_NAME} started successfully")
 
     except Exception as e:
-        ErrorLogger.log_critical(f"Startup error: {str(e)}", exc_info=True)
+        ErrorLogger.log_critical(f"Startup error: {str(e)}")
         raise
 
     yield  # Application runs here
@@ -87,7 +88,7 @@ async def lifespan(app: FastAPI):
         logger.info(f"{settings.APP_NAME} stopped")
 
     except Exception as e:
-        ErrorLogger.log_critical(f"Shutdown error: {str(e)}", exc_info=True)
+        ErrorLogger.log_critical(f"Shutdown error: {str(e)}")
 
 
 # ==== CREATE APP ====
@@ -113,7 +114,7 @@ app.add_middleware(
 )
 
 # GZIP Compression (compress responses > 1KB)
-app.add_middleware(GZIPMiddleware, minimum_size=1000)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 # ==== GLOBAL ERROR HANDLER ====
@@ -296,11 +297,10 @@ async def root():
 
 # Note: Additional routes (auth, documents, chat, search) will be included in Phase 1
 # via the router imports below (once they're created):
-# from app.api.routes import auth, documents, chat, search
-# app.include_router(auth.router)
-# app.include_router(documents.router)
-# app.include_router(chat.router)
-# app.include_router(search.router)
+from app.api.routes import auth, documents, chat, search
+app.include_router(auth.router)
+app.include_router(chat.router)
+app.include_router(search.router)
 
 # ==== ROUTE IMPORTS ====
 # Phase 2: Document routes

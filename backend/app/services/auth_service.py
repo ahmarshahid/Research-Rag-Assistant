@@ -163,5 +163,80 @@ class AuthService:
         return pwd_context.verify(plain_password, hashed_password)
 
 
+    async def register_user(self, email: str, username: str, password: str, db: Any):
+        from sqlalchemy.future import select
+        from app.models.database import User
+        from app.models.schemas import TokenResponse
+        from app.utils.exceptions import ValidationError
+        
+        stmt = select(User).where((User.email == email) | (User.username == username))
+        result = await db.execute(stmt)
+        if result.scalars().first():
+            raise ValidationError("Email or username already registered")
+            
+        hashed_password = self.hash_password(password)
+        new_user = User(email=email, username=username, password_hash=hashed_password)
+        db.add(new_user)
+        await db.commit()
+        await db.refresh(new_user)
+        
+        access_token = self.create_access_token(new_user.id)
+        refresh_token = self.create_refresh_token(new_user.id)
+        
+        tokens = TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            expires_in=self.access_token_expire_minutes * 60
+        )
+        return new_user, tokens
+
+    async def login_user(self, email: str, password: str, db: Any):
+        from sqlalchemy.future import select
+        from app.models.database import User
+        from app.models.schemas import TokenResponse
+        
+        stmt = select(User).where(User.email == email)
+        result = await db.execute(stmt)
+        user = result.scalars().first()
+        
+        if not user or not self.verify_password(password, user.password_hash):
+            raise AuthenticationException("Invalid credentials")
+            
+        access_token = self.create_access_token(user.id)
+        refresh_token = self.create_refresh_token(user.id)
+        
+        tokens = TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            expires_in=self.access_token_expire_minutes * 60
+        )
+        return user, tokens
+
+    async def refresh_access_token(self, refresh_token: str):
+        from app.models.schemas import TokenResponse
+        payload = self.verify_token(refresh_token, token_type="refresh")
+        user_id = UUID(payload["sub"])
+        
+        access_token = self.create_access_token(user_id)
+        new_refresh_token = self.create_refresh_token(user_id)
+        
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=new_refresh_token,
+            token_type="bearer",
+            expires_in=self.access_token_expire_minutes * 60
+        )
+
+    async def logout_user(self, token: str):
+        # We can implement Redis blacklisting here later if needed
+        pass
+
+    async def get_user_by_id(self, user_id: Any, db: Any):
+        from app.models.database import User
+        return await db.get(User, user_id)
+
+
 # Global singleton instance
 auth_service = AuthService()
