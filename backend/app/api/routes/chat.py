@@ -364,7 +364,7 @@ async def send_chat_message(
             model=request.model or "gpt-4",
             temperature=request.temperature or 0.7,
             top_k=request.top_k or 5,
-            min_similarity=request.min_similarity or 0.5
+            min_similarity=request.min_similarity or 0.3
         )
 
         return response

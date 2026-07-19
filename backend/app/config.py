@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     OLLAMA_MODEL: str = Field(
         default="llama2", description="Ollama model name")
 
+    # Google Gemini (free alternative to OpenAI)
+    GEMINI_API_KEY: Optional[str] = Field(
+        default=None, description="Google Gemini API key (free at aistudio.google.com)")
+
     # ==== RETRIEVAL SETTINGS ====
     RETRIEVAL_TOP_K: int = Field(
         default=5, description="Number of chunks to retrieve")

@@ -342,7 +342,7 @@ class ChatService:
         model: str = "gpt-4",
         temperature: float = 0.7,
         top_k: int = 5,
-        min_similarity: float = 0.5
+        min_similarity: float = 0.3
     ) -> ChatMessageResponse:
         """
         Send message and get RAG response.
@@ -491,7 +491,8 @@ class ChatService:
                     top_k=top_k,
                     model=model,
                     temperature=temperature,
-                    min_similarity=min_similarity
+                    min_similarity=min_similarity,
+                    chat_history=context_str
                 )
             except RAGException as e:
                 logger.warning(

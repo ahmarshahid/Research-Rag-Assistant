@@ -5,25 +5,25 @@ This is the entry point for the backend server.
 Configures middleware, routes, error handlers, and startup/shutdown events.
 """
 
-from app.api.routes import embeddings
-from app.api.routes import documents
 import asyncio
+import logging
 import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, status
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
 
-from app.config import settings, ensure_directories
-from app.utils.logger import setup_logging, RequestLogger, ErrorLogger
-from app.utils.errors import ApplicationException
-from app.models.schemas import ErrorResponse, HealthCheckResponse
-from app.dependencies import init_db, AsyncSessionLocal
-from app.cache.redis_client import redis_client
+from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
-import logging
+from starlette.middleware.gzip import GZipMiddleware
+
+from app.api.routes import documents, embeddings
+from app.cache.redis_client import redis_client
+from app.config import ensure_directories, settings
+from app.dependencies import AsyncSessionLocal, init_db
+from app.models.schemas import ErrorResponse, HealthCheckResponse
+from app.utils.errors import ApplicationException
+from app.utils.logger import ErrorLogger, RequestLogger, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -119,13 +119,14 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # ==== GLOBAL ERROR HANDLER ====
 
+
 @app.exception_handler(ApplicationException)
 async def application_exception_handler(request: Request, exc: ApplicationException):
     """Handle custom application exceptions."""
     ErrorLogger.log_error(
         error_type=exc.error_code,
         error_msg=exc.message,
-        context={"path": request.url.path, "method": request.method}
+        context={"path": request.url.path, "method": request.method},
     )
 
     return JSONResponse(
@@ -142,8 +143,7 @@ async def application_exception_handler(request: Request, exc: ApplicationExcept
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handle Pydantic validation errors."""
     error_details = [
-        {"field": error["loc"][-1], "message": error["msg"]}
-        for error in exc.errors()
+        {"field": error["loc"][-1], "message": error["msg"]} for error in exc.errors()
     ]
 
     return JSONResponse(
@@ -165,8 +165,9 @@ async def general_exception_handler(request: Request, exc: Exception):
     )
 
     # Don't expose internal errors in production
-    message = "Internal server error" if settings.ENVIRONMENT == "production" else str(
-        exc)
+    message = (
+        "Internal server error" if settings.ENVIRONMENT == "production" else str(exc)
+    )
 
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -179,6 +180,7 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 
 # ==== REQUEST/RESPONSE MIDDLEWARE ====
+
 
 @app.middleware("http")
 async def add_request_tracking(request: Request, call_next):
@@ -228,6 +230,7 @@ async def add_request_tracking(request: Request, call_next):
 
 # ==== HEALTH CHECK ENDPOINT ====
 
+
 @app.get("/api/health", response_model=HealthCheckResponse, tags=["System"])
 async def health_check():
     """
@@ -261,8 +264,9 @@ async def health_check():
         databases["chromadb"] = f"error: {str(e)[:50]}"
 
     return HealthCheckResponse(
-        status="healthy" if all(
-            "connected" in v for v in databases.values()) else "degraded",
+        status="healthy"
+        if all("connected" in v for v in databases.values())
+        else "degraded",
         version=settings.APP_VERSION,
         environment=settings.ENVIRONMENT,
         databases=databases,
@@ -270,6 +274,7 @@ async def health_check():
 
 
 # ==== INFO ENDPOINT ====
+
 
 @app.get("/api/info", tags=["System"])
 async def get_info():
@@ -285,6 +290,7 @@ async def get_info():
 
 # ==== ROOT ENDPOINT ====
 
+
 @app.get("/")
 async def root():
     """Root endpoint."""
@@ -297,7 +303,8 @@ async def root():
 
 # Note: Additional routes (auth, documents, chat, search) will be included in Phase 1
 # via the router imports below (once they're created):
-from app.api.routes import auth, documents, chat, search
+from app.api.routes import auth, chat, documents, search
+
 app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(search.router)
@@ -308,6 +315,11 @@ app.include_router(documents.router)
 
 # Phase 3: Embedding routes
 app.include_router(embeddings.router)
+
+# Voice: Gemini transcription
+from app.api.routes import voice
+
+app.include_router(voice.router)
 
 
 if __name__ == "__main__":

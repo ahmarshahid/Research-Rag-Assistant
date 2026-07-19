@@ -58,6 +58,92 @@ class RetrievalException(RAGException):
     pass
 
 
+# ---------------------------------------------------------------------------
+# Conversational intent detection
+# ---------------------------------------------------------------------------
+_CONVERSATIONAL_PATTERNS = [
+    # greetings
+    r"^\s*(hi|hello|hey|howdy|hiya|greetings|good\s*(morning|afternoon|evening|night|day))\b",
+    # farewells
+    r"^\s*(bye|goodbye|see\s*you|take\s*care|later|cya|farewell)\b",
+    # thanks
+    r"^\s*(thanks?|thank\s*you|thx|ty|cheers|appreciate\s*it)\b",
+    # how are you
+    r"^\s*(how\s*(are|r)\s*(you|u)|what'?s\s*up|how'?s\s*it\s*going|how\s*do\s*you\s*do)\b",
+    # who / what are you
+    r"^\s*(who|what)\s*(are|r)\s*(you|u)\b",
+    # help without context
+    r"^\s*help\s*[.!?]*\s*$",
+    # ok / yes / no short replies
+    r"^\s*(ok|okay|sure|yep|nope|no|yes|yeah|nah|alright|great|cool|nice|awesome|perfect|got\s*it)\s*[.!?]*\s*$",
+    # introductions: "I'm Ahmar", "I am John", "My name is Sara", "call me Zaid"
+    r"^\s*(i'?m|i\s+am|my\s+name\s+is|call\s+me|this\s+is)\s+[a-zA-Z]+\s*[.!?]*\s*$",
+]
+
+_CONVERSATIONAL_REPLIES: Dict[str, str] = {
+    "greeting": (
+        "Hello! 👋 I'm your AI Research Assistant. "
+        "Ask me anything about your uploaded document — I'll search through it and give you precise, cited answers."
+    ),
+    "farewell": "Goodbye! Feel free to come back whenever you have more questions about your documents. 👋",
+    "thanks": "You're welcome! 😊 Let me know if you have more questions about the document.",
+    "how_are_you": (
+        "I'm doing great, thanks for asking! 🤖 "
+        "I'm here and ready to help you explore your research documents. What would you like to know?"
+    ),
+    "who_are_you": (
+        "I'm an AI Research Assistant powered by RAG (Retrieval-Augmented Generation). "
+        "I analyze your uploaded PDFs and answer questions with cited excerpts from the actual text. "
+        "Try asking something like: *'What is the main topic of this document?'*"
+    ),
+    "help": (
+        "Sure! Here's what I can do:\n"
+        "• **Summarize** the document or any section\n"
+        "• **Answer questions** with page-level citations\n"
+        "• **Find specific information** (dates, names, figures, conclusions)\n\n"
+        "Just type your question and I'll search the document for you!"
+    ),
+    "short_reply": "Got it! Feel free to ask me anything about the document. 😊",
+    "introduction": None,  # handled dynamically below
+}
+
+
+def _detect_conversational_intent(query: str):
+    """
+    Return (intent, name_or_None) if the query is conversational/small-talk,
+    or (None, None) if it looks like a real document question.
+    """
+    import re
+    q = query.strip()
+    ql = q.lower()
+
+    if re.search(_CONVERSATIONAL_PATTERNS[0], ql, re.IGNORECASE):
+        return "greeting", None
+    if re.search(_CONVERSATIONAL_PATTERNS[1], ql, re.IGNORECASE):
+        return "farewell", None
+    if re.search(_CONVERSATIONAL_PATTERNS[2], ql, re.IGNORECASE):
+        return "thanks", None
+    if re.search(_CONVERSATIONAL_PATTERNS[3], ql, re.IGNORECASE):
+        return "how_are_you", None
+    if re.search(_CONVERSATIONAL_PATTERNS[4], ql, re.IGNORECASE):
+        return "who_are_you", None
+    if re.search(_CONVERSATIONAL_PATTERNS[5], ql, re.IGNORECASE):
+        return "help", None
+    if re.search(_CONVERSATIONAL_PATTERNS[6], ql, re.IGNORECASE):
+        return "short_reply", None
+    # Introductions — extract the name
+    intro_match = re.search(_CONVERSATIONAL_PATTERNS[7], ql, re.IGNORECASE)
+    if intro_match:
+        # Pull the name: last word group in the original query
+        name_match = re.search(
+            r"(?:i'?m|i\s+am|my\s+name\s+is|call\s+me|this\s+is)\s+([a-zA-Z]+)",
+            q, re.IGNORECASE
+        )
+        name = name_match.group(1).capitalize() if name_match else "there"
+        return "introduction", name
+    return None, None
+
+
 class CitationExtractor:
     """Extract citations from LLM response."""
 
@@ -155,7 +241,7 @@ class RAGService:
         query: str,
         top_k: int = 5,
         page_number: Optional[int] = None,
-        min_similarity: float = 0.5
+        min_similarity: float = 0.3
     ) -> List[Dict[str, Any]]:
         """
         Retrieve relevant chunks for query.
@@ -208,10 +294,11 @@ class RAGService:
     def _format_context(
         self,
         query: str,
-        retrieved_chunks: List[Dict[str, Any]]
+        retrieved_chunks: List[Dict[str, Any]],
+        chat_history: str = ""
     ) -> str:
         """
-        Format retrieved chunks as LLM context.
+        Format retrieved chunks and chat history as LLM context.
         """
         context_parts = []
         for i, chunk in enumerate(retrieved_chunks, 1):
@@ -224,24 +311,64 @@ class RAGService:
 
         context = "\n\n".join(context_parts)
 
-        prompt = f"""You are a helpful AI assistant that answers questions based on provided document excerpts.
+        history_section = f"Previous Conversation:\n{chat_history}\n\n" if chat_history else ""
 
-Question: {query}
+        prompt = f"""You are a helpful, conversational AI Research Assistant. Your job is to answer questions based on the provided document excerpts, while also maintaining a friendly conversation.
 
-Here are the relevant document excerpts:
+{history_section}Here are the relevant document excerpts for the user's latest message:
 
 {context}
 
+Current User Message: {query}
+
 Instructions:
-- Answer the question based on the provided excerpts
-- Include citations like [1], [2] when referencing specific excerpts
-- If the answer is not in the excerpts, say so clearly
-- Be concise and accurate
-- Format your response clearly
+- First, try to answer the question using ONLY the provided excerpts.
+- If you use the excerpts, include citations like [1], [2] when referencing specific parts.
+- If the answer to the user's question is NOT in the excerpts, you may use your own general knowledge to answer it. HOWEVER, if you do this, you MUST explicitly state at the beginning of your answer: "The provided document does not contain this information, but based on general knowledge..."
+- If the user is just greeting you or making small talk (like "Hi", "I'm Ahmar", "How are you"), reply conversationally and warmly. You don't need to use the document excerpts for small talk.
+- Be concise, accurate, and format your response clearly using markdown.
 
 Answer:"""
 
         return prompt
+
+    async def _call_gemini(self, prompt: str) -> Optional[str]:
+        """
+        Call Google Gemini 2.5 Flash via its REST API using httpx.
+        Free tier: 15 requests/min, 1M tokens/day — no package install needed.
+        """
+        # Force load directly from .env to bypass broken Windows system environment variables
+        from dotenv import dotenv_values
+        env_dict = dotenv_values(".env")
+        gemini_key = env_dict.get("GEMINI_API_KEY", "")
+
+        if not gemini_key or gemini_key.startswith("your-"):
+            return None
+
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-2.5-flash:generateContent?key={gemini_key}"
+        )
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 2048,
+                "topP": 0.9,
+            }
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                logger.info("Gemini response received successfully.")
+                return text
+        except Exception as e:
+            logger.warning(f"Gemini API call failed: {e}")
+            return None
 
     async def generate_response(
         self,
@@ -249,65 +376,77 @@ Answer:"""
         retrieved_chunks: List[Dict[str, Any]],
         model: str = "gpt-4",
         temperature: float = 0.7,
-        max_tokens: int = 2000
+        max_tokens: int = 2000,
+        chat_history: str = ""
     ) -> Tuple[str, List[Dict[str, Any]]]:
         """
         Generate LLM response with retrieved context.
+        Priority: Gemini → OpenAI → Extractive fallback
         """
         await self.initialize()
 
-        # Check if OpenAI client is available and has a valid key
-        api_key = getattr(settings, "OPENAI_API_KEY", None) or getattr(settings, "openai_api_key", None)
+        prompt = self._format_context(query, retrieved_chunks, chat_history)
+
+        # ── 1. Try Google Gemini (free, fast) ──────────────────────────────────
+        gemini_text = await self._call_gemini(prompt)
+        if gemini_text:
+            _, citations = CitationExtractor.extract_citations(gemini_text, retrieved_chunks)
+            return gemini_text, citations
+
+        # ── 2. Try OpenAI ──────────────────────────────────────────────────────
+        from dotenv import dotenv_values
+        env_dict = dotenv_values(".env")
+        api_key = env_dict.get("OPENAI_API_KEY", "")
         has_valid_key = api_key and not api_key.startswith("your-") and len(api_key) > 20
 
         if self.openai_client and has_valid_key:
             try:
-                logger.info(f"Generating response with model={model}")
-                prompt = self._format_context(query, retrieved_chunks)
-
+                logger.info(f"Generating response with OpenAI model={model}")
                 response = await self.openai_client.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
-
                 response_text = response.choices[0].message.content
-                _, citations = CitationExtractor.extract_citations(
-                    response_text,
-                    retrieved_chunks
-                )
+                _, citations = CitationExtractor.extract_citations(response_text, retrieved_chunks)
                 return response_text, citations
 
             except Exception as e:
-                logger.warning(f"OpenAI API call failed ({str(e)}). Switching to local RAG synthesis fallback.")
+                logger.warning(f"OpenAI API call failed ({str(e)}). Falling back to extractive synthesis.")
 
-        # Extractive Local RAG Synthesis Fallback
-        logger.info("Synthesizing answer using local RAG extractive engine.")
-        summary_lines = [f"### 📚 Insights Extracted for: *\"{query}\"*\n"]
+        # ── 3. Extractive fallback (no LLM key) ────────────────────────────────
+        logger.info("Using local extractive synthesis (no LLM key configured).")
         citations = []
+        excerpt_lines = []
 
         for i, chunk in enumerate(retrieved_chunks, 1):
             page = chunk.get("page_number", 1)
+            similarity = chunk.get("similarity", 0)
             text_snippet = chunk.get("text", "").strip()
+            if len(text_snippet) > 400:
+                text_snippet = text_snippet[:400].rsplit(" ", 1)[0] + "…"
             if text_snippet:
-                summary_lines.append(f"**Excerpt [{i}] (Page {page}):**")
-                summary_lines.append(f"> \"{text_snippet}\"\n")
+                excerpt_lines.append(f"**[{i}]** *(Page {page}, relevance: {similarity:.0%})*\n> {text_snippet}")
                 citations.append({
                     "chunk_id": chunk.get("chunk_id"),
                     "page_number": page,
                     "chunk_index": chunk.get("chunk_index"),
                     "char_start": chunk.get("char_start"),
                     "char_end": chunk.get("char_end"),
-                    "text_preview": text_snippet[:200]
+                    "text_preview": chunk.get("text", "")[:200]
                 })
 
-        if not retrieved_chunks:
-            response_text = "I searched the document for relevant excerpts matching your query, but could not find matching text vector passages. Please try broadening your query."
-        else:
-            response_text = "\n".join(summary_lines)
+        if not excerpt_lines:
+            return "I searched the document but couldn't find relevant information for that query. Try rephrasing.", []
 
+        response_text = (
+            f"Here are the most relevant excerpts from the document for **\"{query}\"**:\n\n"
+            + "\n\n".join(excerpt_lines)
+            + "\n\n---\n"
+        )
         return response_text, citations
+
 
     async def generate_response_stream(
         self,
@@ -368,8 +507,9 @@ Answer:"""
         top_k: int = 5,
         model: str = "gpt-4",
         temperature: float = 0.7,
-        min_similarity: float = 0.5,
-        stream: bool = False
+        min_similarity: float = 0.3,
+        stream: bool = False,
+        chat_history: str = ""
     ) -> Dict[str, Any]:
         """
         Complete RAG pipeline: retrieve + generate.
@@ -397,6 +537,26 @@ Answer:"""
         try:
             logger.info(f"Starting RAG pipeline for query: '{query}'")
 
+            # Step 0: Short-circuit for conversational / small-talk queries
+            intent, extra = _detect_conversational_intent(query)
+            if intent:
+                logger.info(f"Conversational query detected (intent={intent}), skipping RAG.")
+                if intent == "introduction" and extra:
+                    reply = (
+                        f"Nice to meet you, **{extra}**! 👋 I'm your AI Research Assistant.\n\n"
+                        f"I'm here to help you explore your uploaded documents. "
+                        f"Feel free to ask me anything about the content — I'll search through it and give you cited answers!"
+                    )
+                else:
+                    reply = _CONVERSATIONAL_REPLIES.get(intent, "Got it! How can I help you with the document?")
+                return {
+                    "query": query,
+                    "response": reply,
+                    "citations": [],
+                    "retrieved_chunks": [],
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+
             # Step 1: Retrieve relevant chunks
             retrieved_chunks = await self.retrieve(
                 document_id=document_id,
@@ -409,7 +569,7 @@ Answer:"""
                 logger.warning(f"No chunks retrieved for query: '{query}'")
                 return {
                     "query": query,
-                    "response": "I couldn't find relevant information in the document.",
+                    "response": "I searched the document but couldn't find relevant information for your query. Try rephrasing or asking something more specific about the document's content.",
                     "citations": [],
                     "retrieved_chunks": [],
                     "timestamp": datetime.utcnow().isoformat()
@@ -420,7 +580,8 @@ Answer:"""
                 query=query,
                 retrieved_chunks=retrieved_chunks,
                 model=model,
-                temperature=temperature
+                temperature=temperature,
+                chat_history=chat_history
             )
 
             logger.info("RAG pipeline completed successfully")
@@ -444,7 +605,7 @@ Answer:"""
         top_k: int = 5,
         model: str = "gpt-4",
         temperature: float = 0.7,
-        min_similarity: float = 0.5
+        min_similarity: float = 0.3
     ) -> AsyncGenerator[str, None]:
         """
         Stream complete RAG response.
