@@ -166,8 +166,8 @@ class Settings(BaseSettings):
     @validator('REDIS_URL')
     def validate_redis_url(cls, v):
         """Validate Redis URL format."""
-        if not v.startswith('redis://'):
-            raise ValueError('REDIS_URL must start with redis://')
+        if not v.startswith('redis://') and not v.startswith('rediss://'):
+            raise ValueError('REDIS_URL must start with redis:// or rediss://')
         return v
 
     @validator('MAX_FILE_SIZE_MB')
